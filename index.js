@@ -1,107 +1,149 @@
-require('dotenv').config();
-const express = require('express');
-const bodyParser = require('body-parser');
-const {google} = require('googleapis');
+/*!
+ * vary
+ * Copyright(c) 2014-2017 Douglas Christopher Wilson
+ * MIT Licensed
+ */
 
-const app = express();
-const oauth2Client = new google.auth.OAuth2(process.env.CLIENT_ID, process.env.SECRET_ID, process.env.REDIRECT);
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+'use strict'
 
-app.get('/', (req, res) => {
-    const url = oauth2Client.generateAuthUrl({
-        access_type:'offline',
-        scope:'https://www.googleapis.com/auth/calendar'
-    });
-    res.redirect(url);
-})
+/**
+ * Module exports.
+ */
 
-app.get('/redirect', (req, res) => {
-    const code = req.query.code;
-    oauth2Client.getToken(code, (err, tokens) => {
-        if(err) {
-            console.error('Could not get token', err);
-            res.send('Error');
-            return;
+module.exports = vary
+module.exports.append = append
+
+/**
+ * RegExp to match field-name in RFC 7230 sec 3.2
+ *
+ * field-name    = token
+ * token         = 1*tchar
+ * tchar         = "!" / "#" / "$" / "%" / "&" / "'" / "*"
+ *               / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
+ *               / DIGIT / ALPHA
+ *               ; any VCHAR, except delimiters
+ */
+
+var FIELD_NAME_REGEXP = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+/**
+ * Append a field to a vary header.
+ *
+ * @param {String} header
+ * @param {String|Array} field
+ * @return {String}
+ * @public
+ */
+
+function append (header, field) {
+  if (typeof header !== 'string') {
+    throw new TypeError('header argument is required')
+  }
+
+  if (!field) {
+    throw new TypeError('field argument is required')
+  }
+
+  // get fields array
+  var fields = !Array.isArray(field)
+    ? parse(String(field))
+    : field
+
+  // assert on invalid field names
+  for (var j = 0; j < fields.length; j++) {
+    if (!FIELD_NAME_REGEXP.test(fields[j])) {
+      throw new TypeError('field argument contains an invalid header name')
+    }
+  }
+
+  // existing, unspecified vary
+  if (header === '*') {
+    return header
+  }
+
+  // enumerate current values
+  var val = header
+  var vals = parse(header.toLowerCase())
+
+  // unspecified vary
+  if (fields.indexOf('*') !== -1 || vals.indexOf('*') !== -1) {
+    return '*'
+  }
+
+  for (var i = 0; i < fields.length; i++) {
+    var fld = fields[i].toLowerCase()
+
+    // append value (case-preserving)
+    if (vals.indexOf(fld) === -1) {
+      vals.push(fld)
+      val = val
+        ? val + ', ' + fields[i]
+        : fields[i]
+    }
+  }
+
+  return val
+}
+
+/**
+ * Parse a vary header into an array.
+ *
+ * @param {String} header
+ * @return {Array}
+ * @private
+ */
+
+function parse (header) {
+  var end = 0
+  var list = []
+  var start = 0
+
+  // gather tokens
+  for (var i = 0, len = header.length; i < len; i++) {
+    switch (header.charCodeAt(i)) {
+      case 0x20: /*   */
+        if (start === end) {
+          start = end = i + 1
         }
-        oauth2Client.setCredentials(tokens);
-        res.send('Successfully logged in');
-    })
-})
+        break
+      case 0x2c: /* , */
+        list.push(header.substring(start, end))
+        start = end = i + 1
+        break
+      default:
+        end = i + 1
+        break
+    }
+  }
 
-app.get('/calendars', (req, res) => {
-    const calendar = google.calendar({version:'v3',auth:oauth2Client});
-    calendar.calendarList.list({}, (err, response) => {
-        if (err) {
-            console.error('error fetching calenders', err);
-            res.end('Error!');
-            return;
-        }
-        const calendars = response.data.items;
-        res.json(calendars);
-    });
-})
+  // final token
+  list.push(header.substring(start, end))
 
-app.get('/events', (req, res) => {
-    const calendarId = req.query.calendar??'primary';
-    const calendar = google.calendar({version:'v3',auth:oauth2Client});
-    calendar.events.list({
-        calendarId,
-        timeMin:(new Date()).toISOString(),
-        maxResults:15,
-        singleEvents:true,
-        orderBy:'startTime'
-    }, (err, response) => {
-        if (err) {
-            console.error('Cannot fetch events');
-            res.send('Error');
-            return;
-        }
-        const events = response.data.items;
-        res.json(events);
-    })
-})
+  return list
+}
 
-app.post('/create-event', (req, res) => {
-    const calendar = google.calendar({version: 'v3', auth: oauth2Client});
-    
-    const { summary, description, startDateTime, endDateTime, timeZone } = req.body;
-  
-    const event = {
-      summary: summary,
-      description: description,
-      start: {
-        dateTime: startDateTime,
-        timeZone: timeZone,
-      },
-      end: {
-        dateTime: endDateTime,
-        timeZone: timeZone,
-      },
-      reminders: {
-        useDefault: false,
-        overrides: [
-          {method: 'popup', minutes: 5},
-        ],
-      },
-    };
-  
-    calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-    }, (err, event) => {
-      if (err) {
-        console.error('Error creating event:', err);
-        res.status(500).json({
-          error: 'Error creating event',
-          details: err.message,
-          code: err.code
-        });
-        return;
-      }
-      console.log('Event created:', event.data);
-      res.status(200).json(event.data);
-    });
-  });
+/**
+ * Mark that a request is varied on a header field.
+ *
+ * @param {Object} res
+ * @param {String|Array} field
+ * @public
+ */
 
-app.listen(8000, () => console.log('Server running at 8000'));
+function vary (res, field) {
+  if (!res || !res.getHeader || !res.setHeader) {
+    // quack quack
+    throw new TypeError('res argument is required')
+  }
+
+  // get existing header
+  var val = res.getHeader('Vary') || ''
+  var header = Array.isArray(val)
+    ? val.join(', ')
+    : String(val)
+
+  // set new header
+  if ((val = append(header, field))) {
+    res.setHeader('Vary', val)
+  }
+}
